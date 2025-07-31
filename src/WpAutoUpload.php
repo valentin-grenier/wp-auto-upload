@@ -44,10 +44,12 @@ class WpAutoUpload
      */
     public function savePost($data, $postarr)
     {
-        if (wp_is_post_revision($postarr['ID']) ||
+        if (
+            wp_is_post_revision($postarr['ID']) ||
             wp_is_post_autosave($postarr['ID']) ||
             (defined('DOING_AJAX') && DOING_AJAX) ||
-            (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE)) {
+            (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE)
+        ) {
             return $data;
         }
 
@@ -81,8 +83,8 @@ class WpAutoUpload
                 $urlParts = parse_url($uploadedImage['url']);
                 $base_url = $uploader::getHostUrl(null, true, true);
                 $image_url = $base_url . $urlParts['path'];
-                $content = preg_replace('/'. preg_quote($image['url'], '/') .'/', $image_url, $content);
-                $content = preg_replace('/alt=["\']'. preg_quote($image['alt'], '/') .'["\']/', "alt='{$uploader->getAlt()}'", $content);
+                $content = preg_replace('/' . preg_quote($image['url'], '/') . '/', $image_url, $content);
+                $content = preg_replace('/alt=["\']' . preg_quote($image['alt'], '/') . '["\']/', "alt='{$uploader->getAlt()}'", $content);
             }
         }
         return $content;
@@ -105,9 +107,12 @@ class WpAutoUpload
                     continue;
                 }
                 foreach ($srcsetUrls as $srcsetUrl) {
-                    $urls1[$count][] = $srcset[0];
-                    $urls1[$count][] = $srcsetUrl[0];
-                    $count++;
+                    // Basic URL validation before adding to array
+                    if ($this->isValidImageUrl($srcsetUrl[0])) {
+                        $urls1[$count][] = $srcset[0];
+                        $urls1[$count][] = $srcsetUrl[0];
+                        $count++;
+                    }
                 }
             }
         }
@@ -119,13 +124,53 @@ class WpAutoUpload
             return array();
         }
         foreach ($urls as $index => &$url) {
+            // Basic URL validation before processing
+            if (!$this->isValidImageUrl($url[1])) {
+                unset($urls[$index]);
+                continue;
+            }
             $images[$index]['alt'] = preg_match('/<img[^>]*alt=["\']([^"\']*)[^"\']*["\'][^>]*>/i', $url[0], $alt) ? $alt[1] : null;
             $images[$index]['url'] = $url = $url[1];
         }
         foreach (array_unique($urls) as $index => $url) {
-            $unique_array[] = $images[$index];
+            if (isset($images[$index])) {
+                $unique_array[] = $images[$index];
+            }
         }
-        return $unique_array;
+        return isset($unique_array) ? $unique_array : array();
+    }
+
+    /**
+     * Basic validation for image URLs to prevent malicious URLs
+     * @param string $url
+     * @return bool
+     */
+    private function isValidImageUrl($url)
+    {
+        // Basic URL structure validation
+        if (empty($url) || !is_string($url)) {
+            return false;
+        }
+
+        // Remove common URL artifacts
+        $url = trim($url);
+
+        // Must start with http:// or https:// or be protocol-relative
+        if (!preg_match('/^(https?:)?\/\//', $url)) {
+            return false;
+        }
+
+        // Basic length check to prevent extremely long URLs
+        if (strlen($url) > 2048) {
+            return false;
+        }
+
+        // Check for suspicious characters that might indicate injection
+        if (preg_match('/[<>"\']/', $url)) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -224,25 +269,110 @@ class WpAutoUpload
                         $_POST[$field] = $this->replaceDeprecatedPatterns($_POST[$field]);
                     }
 
-                    static::$_options[$field] = sanitize_text_field($_POST[$field]);
+                    // Additional validation for base_url field
+                    if ($field === 'base_url') {
+                        $base_url = sanitize_text_field($_POST[$field]);
+                        if (!$this->isValidBaseUrl($base_url)) {
+                            add_action('admin_notices', function () {
+                                echo '<div class="notice notice-error"><p>' .
+                                    __('Invalid base URL provided. Please use a valid HTTP/HTTPS URL.', 'auto-upload-images') .
+                                    '</p></div>';
+                            });
+                            continue;
+                        }
+                        static::$_options[$field] = $base_url;
+                    } else {
+                        static::$_options[$field] = sanitize_text_field($_POST[$field]);
+                    }
                 }
             }
             if (array_key_exists('exclude_urls', $_POST) && $_POST['exclude_urls']) {
-                static::$_options['exclude_urls'] = sanitize_textarea_field($_POST['exclude_urls']);
+                // Validate excluded URLs
+                $exclude_urls = sanitize_textarea_field($_POST['exclude_urls']);
+                if ($this->validateExcludeUrls($exclude_urls)) {
+                    static::$_options['exclude_urls'] = $exclude_urls;
+                } else {
+                    add_action('admin_notices', function () {
+                        echo '<div class="notice notice-error"><p>' .
+                            __('One or more excluded URLs are invalid. Please check the format.', 'auto-upload-images') .
+                            '</p></div>';
+                    });
+                }
             }
             if (array_key_exists('exclude_post_types', $_POST) && $_POST['exclude_post_types']) {
+                static::$_options['exclude_post_types'] = array();
                 foreach ($_POST['exclude_post_types'] as $typ) {
-                    static::$_options['exclude_post_types'][] = sanitize_text_field($typ);
+                    // Validate post type exists
+                    if (post_type_exists(sanitize_text_field($typ))) {
+                        static::$_options['exclude_post_types'][] = sanitize_text_field($typ);
+                    }
                 }
             }
             update_option(self::WP_OPTIONS_KEY, static::$_options);
             $message = __('Settings Saved.', 'auto-upload-images');
         }
 
-        if (isset($_POST['reset']) && self::resetOptionsToDefaults()) {
+        if (isset($_POST['reset']) && check_admin_referer('aui_settings') && self::resetOptionsToDefaults()) {
             $message = __('Successfully settings reset to defaults.', 'auto-upload-images');
         }
 
         include_once('setting-page.php');
+    }
+
+    /**
+     * Validate base URL setting
+     * @param string $url
+     * @return bool
+     */
+    private function isValidBaseUrl($url)
+    {
+        if (empty($url)) {
+            return false;
+        }
+
+        // Allow relative URLs like "/"
+        if ($url === '/') {
+            return true;
+        }
+
+        // For full URLs, validate structure
+        $parsed = parse_url($url);
+        if (!$parsed || !isset($parsed['scheme']) || !isset($parsed['host'])) {
+            return false;
+        }
+
+        // Only allow HTTP and HTTPS
+        if (!in_array(strtolower($parsed['scheme']), ['http', 'https'], true)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Validate excluded URLs list
+     * @param string $urls_text
+     * @return bool
+     */
+    private function validateExcludeUrls($urls_text)
+    {
+        if (empty($urls_text)) {
+            return true;
+        }
+
+        $urls = explode("\n", $urls_text);
+        foreach ($urls as $url) {
+            $url = trim($url);
+            if (empty($url)) {
+                continue;
+            }
+
+            $parsed = parse_url($url);
+            if (!$parsed || !isset($parsed['host'])) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

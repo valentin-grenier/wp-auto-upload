@@ -47,6 +47,23 @@ class ImageUploader
      */
     public function validate()
     {
+        // Parse and validate the URL
+        $parsed_url = parse_url($this->url);
+
+        if (!$parsed_url || !isset($parsed_url['scheme']) || !isset($parsed_url['host'])) {
+            return false;
+        }
+
+        // Only allow HTTP and HTTPS protocols
+        if (!in_array(strtolower($parsed_url['scheme']), ['http', 'https'], true)) {
+            return false;
+        }
+
+        // Validate against SSRF attacks
+        if (!$this->isUrlSafe($parsed_url['host'])) {
+            return false;
+        }
+
         $url = self::getHostUrl($this->url);
         $site_url = self::getHostUrl() === null ? self::getHostUrl(site_url('url')) : self::getHostUrl();
 
@@ -59,6 +76,82 @@ class ImageUploader
 
             foreach ($exclude_urls as $exclude_url) {
                 if ($url === self::getHostUrl(trim($exclude_url))) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Check if URL is safe from SSRF attacks
+     * @param string $host
+     * @return bool
+     */
+    private function isUrlSafe($host)
+    {
+        // Convert hostname to IP if needed
+        $ip = gethostbyname($host);
+
+        // If gethostbyname fails, it returns the original hostname
+        if ($ip === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
+            // If it's not an IP and DNS resolution failed, block it
+            if (!checkdnsrr($host, 'A') && !checkdnsrr($host, 'AAAA')) {
+                return false;
+            }
+            // Try to resolve again for validation
+            $ip = gethostbyname($host);
+        }
+
+        // Validate IP address
+        if (filter_var($ip, FILTER_VALIDATE_IP)) {
+            return $this->isIpSafe($ip);
+        }
+
+        // If we still don't have a valid IP, block the request
+        return false;
+    }
+
+    /**
+     * Check if IP address is safe (not in private/reserved ranges)
+     * @param string $ip
+     * @return bool
+     */
+    private function isIpSafe($ip)
+    {
+        // Block private IP ranges
+        if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+            return false;
+        }
+
+        // Additional checks for common internal/metadata endpoints
+        $blocked_ips = [
+            '127.0.0.1',        // localhost
+            '0.0.0.0',          // any address
+            '169.254.169.254',  // AWS metadata
+            '::1',              // IPv6 localhost
+        ];
+
+        if (in_array($ip, $blocked_ips, true)) {
+            return false;
+        }
+
+        // Block local network ranges explicitly
+        $ip_long = ip2long($ip);
+        if ($ip_long !== false) {
+            $private_ranges = [
+                ['10.0.0.0', '10.255.255.255'],      // 10.0.0.0/8
+                ['172.16.0.0', '172.31.255.255'],    // 172.16.0.0/12
+                ['192.168.0.0', '192.168.255.255'],  // 192.168.0.0/16
+                ['127.0.0.0', '127.255.255.255'],    // 127.0.0.0/8
+                ['169.254.0.0', '169.254.255.255'],  // 169.254.0.0/16 (link-local)
+            ];
+
+            foreach ($private_ranges as $range) {
+                $start = ip2long($range[0]);
+                $end = ip2long($range[1]);
+                if ($ip_long >= $start && $ip_long <= $end) {
                     return false;
                 }
             }
@@ -161,6 +254,13 @@ class ImageUploader
      */
     public function save()
     {
+        // Normalize the URL first
+        $normalized_url = self::normalizeUrl($this->url);
+        if ($normalized_url === false) {
+            return null;
+        }
+        $this->url = $normalized_url;
+
         if (!$this->validate()) {
             return null;
         }
@@ -182,13 +282,30 @@ class ImageUploader
     public function downloadImage($url)
     {
         $url = self::normalizeUrl($url);
-        $args = [
-            'user-agent' => ''
-        ];
-        $parsedUrl = parse_url($url);
-        if (isset($parsedUrl['host'])){
-            $args['headers']['host'] = $parsedUrl['host'];
+
+        // Additional validation before making the request
+        $parsed_url = parse_url($url);
+        if (!$parsed_url || !isset($parsed_url['host'])) {
+            return new WP_Error('aui_invalid_url', 'AUI: Invalid URL provided.');
         }
+
+        // Final SSRF check before making request
+        if (!$this->isUrlSafe($parsed_url['host'])) {
+            return new WP_Error('aui_blocked_url', 'AUI: URL blocked for security reasons.');
+        }
+
+        $args = [
+            'user-agent' => 'WordPress/' . get_bloginfo('version') . '; ' . home_url(),
+            'timeout' => 30,
+            'redirection' => 3,  // Limit redirects
+            'sslverify' => true,
+            'headers' => [],
+        ];
+
+        if (isset($parsed_url['host'])) {
+            $args['headers']['host'] = $parsed_url['host'];
+        }
+
         $response = wp_remote_get($url, $args);
 
         if ($response instanceof WP_Error) {
@@ -267,7 +384,7 @@ class ImageUploader
         );
         $attach_id = wp_insert_attachment($attachment, $image['path'], $this->post['ID']);
         if (!function_exists('wp_generate_attachment_metadata')) {
-            include_once( ABSPATH . 'wp-admin/includes/image.php' );
+            include_once(ABSPATH . 'wp-admin/includes/image.php');
         }
         $attach_data = wp_generate_attachment_metadata($attach_id, $image['path']);
 
@@ -324,14 +441,43 @@ class ImageUploader
     }
 
     /**
+     * Normalize and validate URL
      * @param $url
-     * @return string
+     * @return string|false
      */
     public static function normalizeUrl($url)
     {
+        // Handle protocol-relative URLs
         if (preg_match('/^\/\/.*$/', $url)) {
-            return 'https:' . $url;
+            $url = 'https:' . $url;
         }
-        return $url;
+
+        // Validate the URL structure
+        $parsed = parse_url($url);
+        if (!$parsed || !isset($parsed['scheme']) || !isset($parsed['host'])) {
+            return false;
+        }
+
+        // Only allow HTTP and HTTPS
+        if (!in_array(strtolower($parsed['scheme']), ['http', 'https'], true)) {
+            return false;
+        }
+
+        // Rebuild URL to prevent injection
+        $normalized = $parsed['scheme'] . '://' . $parsed['host'];
+
+        if (isset($parsed['port'])) {
+            $normalized .= ':' . $parsed['port'];
+        }
+
+        if (isset($parsed['path'])) {
+            $normalized .= $parsed['path'];
+        }
+
+        if (isset($parsed['query'])) {
+            $normalized .= '?' . $parsed['query'];
+        }
+
+        return $normalized;
     }
 }
