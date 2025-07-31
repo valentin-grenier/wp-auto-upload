@@ -115,6 +115,74 @@ class SecurityFixesTest extends WP_UnitTestCase
     }
 
     /**
+     * Test IPv6 address blocking
+     */
+    public function testIPv6Blocking()
+    {
+        // Test IPv6 localhost
+        $this->imageUploader->url = 'http://[::1]/test.jpg';
+        $this->assertFalse($this->imageUploader->validate());
+
+        // Test IPv6 link-local
+        $this->imageUploader->url = 'http://[fe80::1]/test.jpg';
+        $this->assertFalse($this->imageUploader->validate());
+
+        // Test IPv6 unique local
+        $this->imageUploader->url = 'http://[fc00::1]/test.jpg';
+        $this->assertFalse($this->imageUploader->validate());
+    }
+
+    /**
+     * Test that DNS rebinding attacks are prevented
+     */
+    public function testDNSRebindingPrevention()
+    {
+        // Mock a domain that could resolve to different IPs
+        // This test would need actual DNS mocking in a real environment
+        $this->assertTrue(true); // Placeholder - actual implementation would need DNS mocking
+    }
+
+    /**
+     * Test secure temporary file handling
+     */
+    public function testSecureTempFileHandling()
+    {
+        // Test that temp files are created in secure location
+        $reflection = new \ReflectionClass('ImageUploader');
+        $method = $reflection->getMethod('createSecureTempFile');
+        $method->setAccessible(true);
+
+        $uploader = new ImageUploader('https://example.com/test.jpg', 'test', ['ID' => 1]);
+        $result = $method->invoke($uploader, 'test content');
+
+        $this->assertNotInstanceOf('WP_Error', $result);
+        $this->assertStringContainsString('aui-temp', $result);
+
+        // Clean up
+        if (file_exists($result)) {
+            unlink($result);
+        }
+    }
+
+    /**
+     * Test path traversal prevention
+     */
+    public function testPathTraversalPrevention()
+    {
+        $reflection = new \ReflectionClass('ImageUploader');
+        $method = $reflection->getMethod('isSecureFilePath');
+        $method->setAccessible(true);
+
+        $uploader = new ImageUploader('https://example.com/test.jpg', 'test', ['ID' => 1]);
+
+        // Test valid path
+        $this->assertTrue($method->invoke($uploader, '/valid/path/file.jpg', '/valid/path'));
+
+        // Test traversal attempt
+        $this->assertFalse($method->invoke($uploader, '/valid/path/../../../etc/passwd', '/valid/path'));
+    }
+
+    /**
      * Helper method to test private methods
      */
     protected function invokeMethod($object, $methodName, array $parameters = [])

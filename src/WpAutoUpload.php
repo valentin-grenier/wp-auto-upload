@@ -23,8 +23,10 @@ class WpAutoUpload
     {
         add_action('plugins_loaded', array($this, 'initTextdomain'));
         add_action('admin_menu', array($this, 'addAdminMenu'));
+        add_action('wp_insert_post_data', array($this, 'savePost'), 10, 2);
 
-        add_filter('wp_insert_post_data', array($this, 'savePost'), 10, 2);
+        // Register cleanup task
+        add_action('wp_scheduled_delete', array('ImageUploader', 'cleanupTempFiles'));
     }
 
     /**

@@ -91,26 +91,66 @@ class ImageUploader
      */
     private function isUrlSafe($host)
     {
-        // Convert hostname to IP if needed
-        $ip = gethostbyname($host);
+        // Resolve DNS only once to prevent TOCTOU attacks
+        $ips = $this->getAllHostIPs($host);
 
-        // If gethostbyname fails, it returns the original hostname
-        if ($ip === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
-            // If it's not an IP and DNS resolution failed, block it
-            if (!checkdnsrr($host, 'A') && !checkdnsrr($host, 'AAAA')) {
+        if (empty($ips)) {
+            return false;
+        }
+
+        // Check all resolved IPs
+        foreach ($ips as $ip) {
+            if (!$this->isIpSafe($ip)) {
                 return false;
             }
-            // Try to resolve again for validation
+        }
+
+        return true;
+    }
+
+    /**
+     * Get all IP addresses for a hostname
+     * @param string $host
+     * @return array
+     */
+    private function getAllHostIPs($host)
+    {
+        $ips = [];
+
+        // If it's already an IP address, validate and return
+        if (filter_var($host, FILTER_VALIDATE_IP)) {
+            return [$host];
+        }
+
+        // Resolve IPv4 addresses
+        $ipv4_records = dns_get_record($host, DNS_A);
+        if (is_array($ipv4_records)) {
+            foreach ($ipv4_records as $record) {
+                if (isset($record['ip'])) {
+                    $ips[] = $record['ip'];
+                }
+            }
+        }
+
+        // Resolve IPv6 addresses
+        $ipv6_records = dns_get_record($host, DNS_AAAA);
+        if (is_array($ipv6_records)) {
+            foreach ($ipv6_records as $record) {
+                if (isset($record['ipv6'])) {
+                    $ips[] = $record['ipv6'];
+                }
+            }
+        }
+
+        // Fallback to gethostbyname for IPv4 if DNS records failed
+        if (empty($ips)) {
             $ip = gethostbyname($host);
+            if ($ip !== $host && filter_var($ip, FILTER_VALIDATE_IP)) {
+                $ips[] = $ip;
+            }
         }
 
-        // Validate IP address
-        if (filter_var($ip, FILTER_VALIDATE_IP)) {
-            return $this->isIpSafe($ip);
-        }
-
-        // If we still don't have a valid IP, block the request
-        return false;
+        return array_unique($ips);
     }
 
     /**
@@ -120,44 +160,189 @@ class ImageUploader
      */
     private function isIpSafe($ip)
     {
-        // Block private IP ranges
+        // Validate IP format first
+        if (!filter_var($ip, FILTER_VALIDATE_IP)) {
+            return false;
+        }
+
+        // Block private IP ranges using PHP's built-in filter
         if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
             return false;
         }
 
-        // Additional checks for common internal/metadata endpoints
+        // Additional checks for IPv4 addresses
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+            return $this->isIPv4Safe($ip);
+        }
+
+        // Additional checks for IPv6 addresses
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            return $this->isIPv6Safe($ip);
+        }
+
+        return false;
+    }
+
+    /**
+     * Check IPv4 address safety
+     * @param string $ip
+     * @return bool
+     */
+    private function isIPv4Safe($ip)
+    {
+        // Additional blocked IPv4 ranges not covered by PHP filters
         $blocked_ips = [
-            '127.0.0.1',        // localhost
             '0.0.0.0',          // any address
+            '127.0.0.1',        // localhost
             '169.254.169.254',  // AWS metadata
-            '::1',              // IPv6 localhost
         ];
 
         if (in_array($ip, $blocked_ips, true)) {
             return false;
         }
 
-        // Block local network ranges explicitly
+        // Check against specific ranges that should be blocked
         $ip_long = ip2long($ip);
         if ($ip_long !== false) {
-            $private_ranges = [
-                ['10.0.0.0', '10.255.255.255'],      // 10.0.0.0/8
-                ['172.16.0.0', '172.31.255.255'],    // 172.16.0.0/12
-                ['192.168.0.0', '192.168.255.255'],  // 192.168.0.0/16
-                ['127.0.0.0', '127.255.255.255'],    // 127.0.0.0/8
-                ['169.254.0.0', '169.254.255.255'],  // 169.254.0.0/16 (link-local)
+            $dangerous_ranges = [
+                ['0.0.0.0', '0.255.255.255'],        // 0.0.0.0/8 - "This host on this network"
+                ['100.64.0.0', '100.127.255.255'],   // 100.64.0.0/10 - Carrier-grade NAT
+                ['169.254.0.0', '169.254.255.255'],  // 169.254.0.0/16 - Link-local
+                ['224.0.0.0', '255.255.255.255'],    // 224.0.0.0/4 - Multicast and reserved
             ];
 
-            foreach ($private_ranges as $range) {
+            foreach ($dangerous_ranges as $range) {
                 $start = ip2long($range[0]);
                 $end = ip2long($range[1]);
-                if ($ip_long >= $start && $ip_long <= $end) {
+                if ($start !== false && $end !== false && $ip_long >= $start && $ip_long <= $end) {
                     return false;
                 }
             }
         }
 
         return true;
+    }
+
+    /**
+     * Check IPv6 address safety
+     * @param string $ip
+     * @return bool
+     */
+    private function isIPv6Safe($ip)
+    {
+        // Normalize IPv6 address
+        $ip = inet_pton($ip);
+        if ($ip === false) {
+            return false;
+        }
+
+        // Block dangerous IPv6 ranges
+        $dangerous_prefixes = [
+            '::1',              // localhost
+            'fe80:',            // link-local
+            'fc00:',            // unique local
+            'fd00:',            // unique local
+            'ff00:',            // multicast
+        ];
+
+        $ip_hex = bin2hex($ip);
+        foreach ($dangerous_prefixes as $prefix) {
+            if ($prefix === '::1') {
+                // Special case for localhost
+                if ($ip_hex === '00000000000000000000000000000001') {
+                    return false;
+                }
+            } else {
+                // Check prefix
+                $prefix_hex = str_replace(':', '', $prefix);
+                if (strpos($ip_hex, $prefix_hex) === 0) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Create a secure temporary file
+     * @param string $content
+     * @return string|WP_Error
+     */
+    private function createSecureTempFile($content)
+    {
+        // Use WordPress upload directory for temp files instead of system temp
+        $upload_dir = wp_upload_dir();
+        $temp_dir = $upload_dir['basedir'] . '/aui-temp';
+
+        // Create temp directory if it doesn't exist
+        if (!is_dir($temp_dir)) {
+            if (!wp_mkdir_p($temp_dir)) {
+                return new WP_Error('aui_temp_dir_failed', 'AUI: Could not create temp directory.');
+            }
+        }
+
+        // Generate secure filename
+        $temp_filename = uniqid('aui_', true) . '.tmp';
+        $temp_path = $temp_dir . DIRECTORY_SEPARATOR . $temp_filename;
+
+        // Ensure path doesn't contain traversal attempts
+        $real_temp_dir = realpath($temp_dir);
+        $real_temp_path = $real_temp_dir . DIRECTORY_SEPARATOR . basename($temp_filename);
+
+        if (strpos($real_temp_path, $real_temp_dir) !== 0) {
+            return new WP_Error('aui_path_traversal', 'AUI: Invalid file path.');
+        }
+
+        // Write content securely
+        $bytes_written = file_put_contents($real_temp_path, $content, LOCK_EX);
+        if ($bytes_written === false) {
+            return new WP_Error('aui_temp_write_failed', 'AUI: Could not write temp file.');
+        }
+
+        return $real_temp_path;
+    }
+
+    /**
+     * Validate file path to prevent directory traversal
+     * @param string $file_path
+     * @param string $base_path
+     * @return bool
+     */
+    private function isSecureFilePath($file_path, $base_path)
+    {
+        // Get real paths to prevent traversal
+        $real_base = realpath($base_path);
+        $real_file = realpath(dirname($file_path)) . DIRECTORY_SEPARATOR . basename($file_path);
+
+        if ($real_base === false) {
+            return false;
+        }
+
+        // Ensure file path is within base directory
+        return strpos($real_file, $real_base . DIRECTORY_SEPARATOR) === 0;
+    }
+
+    /**
+     * Clean up temporary files older than 1 hour
+     */
+    public static function cleanupTempFiles()
+    {
+        $upload_dir = wp_upload_dir();
+        $temp_dir = $upload_dir['basedir'] . '/aui-temp';
+
+        if (!is_dir($temp_dir)) {
+            return;
+        }
+
+        $files = glob($temp_dir . '/*.tmp');
+        $now = time();
+
+        foreach ($files as $file) {
+            if (is_file($file) && $now - filemtime($file) > 3600) { // 1 hour
+                unlink($file);
+            }
+        }
     }
 
     /**
@@ -294,12 +479,16 @@ class ImageUploader
             return new WP_Error('aui_blocked_url', 'AUI: URL blocked for security reasons.');
         }
 
+        // Set maximum file size (50MB)
+        $max_size = 50 * 1024 * 1024;
+
         $args = [
             'user-agent' => 'WordPress/' . get_bloginfo('version') . '; ' . home_url(),
             'timeout' => 30,
             'redirection' => 3,  // Limit redirects
             'sslverify' => true,
             'headers' => [],
+            'limit_response_size' => $max_size,
         ];
 
         if (isset($parsed_url['host'])) {
@@ -316,10 +505,28 @@ class ImageUploader
             return new WP_Error('aui_download_failed', 'AUI: Image file bad response.');
         }
 
-        $tempFile = tempnam(sys_get_temp_dir(), 'WP_AUI');
-        file_put_contents($tempFile, $response['body']);
-        $mime = wp_get_image_mime($tempFile);
-        unlink($tempFile);
+        // Check response size
+        $body = $response['body'];
+        if (strlen($body) > $max_size) {
+            return new WP_Error('aui_file_too_large', 'AUI: Image file too large.');
+        }
+
+        if (empty($body)) {
+            return new WP_Error('aui_empty_response', 'AUI: Empty response body.');
+        }
+
+        // Create secure temporary file
+        $temp_file = $this->createSecureTempFile($body);
+        if (is_wp_error($temp_file)) {
+            return $temp_file;
+        }
+
+        $mime = wp_get_image_mime($temp_file);
+
+        // Clean up temp file immediately after mime check
+        if (file_exists($temp_file)) {
+            unlink($temp_file);
+        }
 
         if ($mime === false || strpos($mime, 'image/') !== 0) {
             return new WP_Error('aui_invalid_file', 'AUI: File type is not image.');
@@ -351,9 +558,14 @@ class ImageUploader
             return $image;
         }
 
-        file_put_contents($image['path'], $response['body']);
+        // Validate file path before writing
+        if (!$this->isSecureFilePath($image['path'], $image['base_path'])) {
+            return new WP_Error('aui_insecure_path', 'AUI: Insecure file path detected.');
+        }
 
-        if (!is_file($image['path'])) {
+        // Write file securely
+        $bytes_written = file_put_contents($image['path'], $body, LOCK_EX);
+        if ($bytes_written === false || !is_file($image['path'])) {
             return new WP_Error('aui_image_save_failed', 'AUI: Image save to upload dir failed.');
         }
 
