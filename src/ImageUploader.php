@@ -28,16 +28,16 @@ class ImageUploader
         }
 
         $sanitized = [];
-        
+
         // Sanitize ID
         $sanitized['ID'] = isset($post['ID']) ? absint($post['ID']) : 0;
-        
+
         // Sanitize post name
         $sanitized['post_name'] = isset($post['post_name']) ? sanitize_title($post['post_name']) : '';
-        
+
         // Sanitize date fields
         $sanitized['post_date_gmt'] = isset($post['post_date_gmt']) ? sanitize_text_field($post['post_date_gmt']) : '';
-        
+
         // Keep other fields but sanitize them
         foreach ($post as $key => $value) {
             if (!isset($sanitized[$key]) && is_string($value)) {
@@ -46,7 +46,7 @@ class ImageUploader
                 $sanitized[$key] = $value;
             }
         }
-        
+
         return $sanitized;
     }
 
@@ -427,7 +427,7 @@ class ImageUploader
     public function getAlt()
     {
         $alt = $this->resolvePattern(WpAutoUpload::getOption('alt_name'));
-        
+
         // Sanitize alt attribute to prevent XSS
         return esc_attr($alt);
     }
@@ -466,10 +466,10 @@ class ImageUploader
                 // Escape the rule to prevent regex injection
                 $escaped_rule = preg_quote($rule, '/');
                 $replacement = array_key_exists($rule, $patterns) ? $patterns[$rule] : $rule;
-                
+
                 // Sanitize replacement value to prevent injection
                 $safe_replacement = $this->sanitizePatternReplacement($replacement);
-                
+
                 $pattern = preg_replace("/$escaped_rule/", $safe_replacement, $pattern);
             }
         }
@@ -487,13 +487,13 @@ class ImageUploader
         if ($value === null) {
             return '';
         }
-        
+
         // Convert to string and sanitize
         $value = (string) $value;
-        
+
         // Remove potentially dangerous characters
         $value = preg_replace('/[<>"\'\\\]/', '', $value);
-        
+
         // Limit length to prevent extremely long filenames
         return substr($value, 0, 100);
     }

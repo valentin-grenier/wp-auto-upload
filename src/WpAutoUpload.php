@@ -85,14 +85,14 @@ class WpAutoUpload
                 $urlParts = parse_url($uploadedImage['url']);
                 $base_url = $uploader::getHostUrl(null, true, true);
                 $image_url = $base_url . $urlParts['path'];
-                
+
                 // Safely escape the URLs for regex replacement
                 $old_url_escaped = preg_quote($image['url'], '/');
                 $new_url_escaped = esc_url($image_url);
-                
+
                 // Replace the image URL
                 $content = preg_replace('/' . $old_url_escaped . '/', $new_url_escaped, $content);
-                
+
                 // Safely replace alt attribute
                 if (!empty($image['alt'])) {
                     $old_alt_escaped = preg_quote($image['alt'], '/');
@@ -285,10 +285,10 @@ class WpAutoUpload
                         $pattern = $this->replaceDeprecatedPatterns($_POST[$field]);
                         // Additional validation for pattern fields
                         if (!$this->isValidPattern($pattern)) {
-                            add_action('admin_notices', function() use ($field) {
-                                echo '<div class="notice notice-error"><p>' . 
-                                     sprintf(__('Invalid pattern provided for %s. Please use only allowed pattern codes.', 'auto-upload-images'), $field) . 
-                                     '</p></div>';
+                            add_action('admin_notices', function () use ($field) {
+                                echo '<div class="notice notice-error"><p>' .
+                                    sprintf(__('Invalid pattern provided for %s. Please use only allowed pattern codes.', 'auto-upload-images'), $field) .
+                                    '</p></div>';
                             });
                             continue;
                         }
@@ -410,14 +410,26 @@ class WpAutoUpload
     {
         // List of allowed pattern codes
         $allowed_patterns = [
-            '%filename%', '%image_alt%', '%today_date%', '%year%', '%month%', 
-            '%today_day%', '%post_date%', '%post_year%', '%post_month%', 
-            '%post_day%', '%url%', '%random%', '%timestamp%', '%post_id%', '%postname%'
+            '%filename%',
+            '%image_alt%',
+            '%today_date%',
+            '%year%',
+            '%month%',
+            '%today_day%',
+            '%post_date%',
+            '%post_year%',
+            '%post_month%',
+            '%post_day%',
+            '%url%',
+            '%random%',
+            '%timestamp%',
+            '%post_id%',
+            '%postname%'
         ];
-        
+
         // Find all pattern codes in the input
         preg_match_all('/%[^%]*%/', $pattern, $matches);
-        
+
         if (!empty($matches[0])) {
             foreach ($matches[0] as $match) {
                 if (!in_array($match, $allowed_patterns, true)) {
@@ -425,17 +437,17 @@ class WpAutoUpload
                 }
             }
         }
-        
+
         // Check for potentially dangerous content
         if (preg_match('/[<>"\'\\\]/', $pattern)) {
             return false;
         }
-        
+
         // Length limit
         if (strlen($pattern) > 200) {
             return false;
         }
-        
+
         return true;
     }
 }
