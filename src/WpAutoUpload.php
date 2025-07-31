@@ -85,8 +85,20 @@ class WpAutoUpload
                 $urlParts = parse_url($uploadedImage['url']);
                 $base_url = $uploader::getHostUrl(null, true, true);
                 $image_url = $base_url . $urlParts['path'];
-                $content = preg_replace('/' . preg_quote($image['url'], '/') . '/', $image_url, $content);
-                $content = preg_replace('/alt=["\']' . preg_quote($image['alt'], '/') . '["\']/', "alt='{$uploader->getAlt()}'", $content);
+                
+                // Safely escape the URLs for regex replacement
+                $old_url_escaped = preg_quote($image['url'], '/');
+                $new_url_escaped = esc_url($image_url);
+                
+                // Replace the image URL
+                $content = preg_replace('/' . $old_url_escaped . '/', $new_url_escaped, $content);
+                
+                // Safely replace alt attribute
+                if (!empty($image['alt'])) {
+                    $old_alt_escaped = preg_quote($image['alt'], '/');
+                    $new_alt_escaped = esc_attr($uploader->getAlt());
+                    $content = preg_replace('/alt=["\']' . $old_alt_escaped . '["\']/', "alt=\"{$new_alt_escaped}\"", $content);
+                }
             }
         }
         return $content;
@@ -251,7 +263,9 @@ class WpAutoUpload
 
         if ($rules[0]) {
             foreach ($rules[0] as $rule) {
-                $pattern = preg_replace("/$rule/", array_key_exists($rule, $patterns) ? $patterns[$rule] : $rule, $pattern);
+                // Use str_replace instead of preg_replace to prevent regex injection
+                $replacement = array_key_exists($rule, $patterns) ? $patterns[$rule] : $rule;
+                $pattern = str_replace($rule, $replacement, $pattern);
             }
         }
 
@@ -268,11 +282,20 @@ class WpAutoUpload
             foreach ($textFields as $field) {
                 if (array_key_exists($field, $_POST) && $_POST[$field]) {
                     if ($field === 'image_name' || $field === 'alt_name') {
-                        $_POST[$field] = $this->replaceDeprecatedPatterns($_POST[$field]);
+                        $pattern = $this->replaceDeprecatedPatterns($_POST[$field]);
+                        // Additional validation for pattern fields
+                        if (!$this->isValidPattern($pattern)) {
+                            add_action('admin_notices', function() use ($field) {
+                                echo '<div class="notice notice-error"><p>' . 
+                                     sprintf(__('Invalid pattern provided for %s. Please use only allowed pattern codes.', 'auto-upload-images'), $field) . 
+                                     '</p></div>';
+                            });
+                            continue;
+                        }
+                        static::$_options[$field] = sanitize_text_field($pattern);
                     }
-
                     // Additional validation for base_url field
-                    if ($field === 'base_url') {
+                    elseif ($field === 'base_url') {
                         $base_url = sanitize_text_field($_POST[$field]);
                         if (!$this->isValidBaseUrl($base_url)) {
                             add_action('admin_notices', function () {
@@ -375,6 +398,44 @@ class WpAutoUpload
             }
         }
 
+        return true;
+    }
+
+    /**
+     * Validate pattern to ensure it only contains allowed pattern codes
+     * @param string $pattern
+     * @return bool
+     */
+    private function isValidPattern($pattern)
+    {
+        // List of allowed pattern codes
+        $allowed_patterns = [
+            '%filename%', '%image_alt%', '%today_date%', '%year%', '%month%', 
+            '%today_day%', '%post_date%', '%post_year%', '%post_month%', 
+            '%post_day%', '%url%', '%random%', '%timestamp%', '%post_id%', '%postname%'
+        ];
+        
+        // Find all pattern codes in the input
+        preg_match_all('/%[^%]*%/', $pattern, $matches);
+        
+        if (!empty($matches[0])) {
+            foreach ($matches[0] as $match) {
+                if (!in_array($match, $allowed_patterns, true)) {
+                    return false;
+                }
+            }
+        }
+        
+        // Check for potentially dangerous content
+        if (preg_match('/[<>"\'\\\]/', $pattern)) {
+            return false;
+        }
+        
+        // Length limit
+        if (strlen($pattern) > 200) {
+            return false;
+        }
+        
         return true;
     }
 }
